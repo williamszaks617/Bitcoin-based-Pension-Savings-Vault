@@ -1,4 +1,6 @@
 (define-constant PENALTY-BPS u1000)
+(define-constant EMERGENCY-PENALTY-BPS u2500)
+(define-constant EMERGENCY-COOLDOWN-BLOCKS u1008)
 (define-constant MAX-BPS u10000)
 (define-constant MIN-RETIREMENT-AGE u60)
 (define-map users
@@ -7,6 +9,13 @@
         balance: uint,
         start-height: uint,
         retirement-age: uint,
+    }
+)
+(define-map emergency-requests
+    principal
+    {
+        amount: uint,
+        request-height: uint,
     }
 )
 (define-read-only (get-user (user principal))
@@ -85,4 +94,64 @@
 )
 (define-read-only (get-contract-balance)
     (ok (stx-get-balance (as-contract tx-sender)))
+)
+(define-public (request-emergency-withdrawal (amount uint))
+    (match (map-get? users tx-sender)
+        user-data (begin
+            (asserts! (> amount u0) (err u108))
+            (asserts! (<= amount (get balance user-data)) (err u109))
+            (asserts! (is-none (map-get? emergency-requests tx-sender)) (err u110))
+            (map-set emergency-requests tx-sender {
+                amount: amount,
+                request-height: burn-block-height,
+            })
+            (ok amount)
+        )
+        (err u111)
+    )
+)
+(define-public (execute-emergency-withdrawal)
+    (match (map-get? emergency-requests tx-sender)
+        request-data (let (
+                (request-height (get request-height request-data))
+                (requested-amount (get amount request-data))
+                (current-height burn-block-height)
+                (penalty (/ (* requested-amount EMERGENCY-PENALTY-BPS) MAX-BPS))
+                (final-amount (- requested-amount penalty))
+            )
+            (begin
+                (asserts! (>= (- current-height request-height) EMERGENCY-COOLDOWN-BLOCKS) (err u112))
+                (match (map-get? users tx-sender)
+                    user-data (let (
+                            (current-balance (get balance user-data))
+                        )
+                        (begin
+                            (asserts! (>= current-balance requested-amount) (err u113))
+                            (map-set users tx-sender {
+                                balance: (- current-balance requested-amount),
+                                start-height: (get start-height user-data),
+                                retirement-age: (get retirement-age user-data),
+                            })
+                            (map-delete emergency-requests tx-sender)
+                            (stx-transfer? final-amount (as-contract tx-sender) tx-sender)
+                        )
+                    )
+                    (err u114)
+                )
+            )
+        )
+        (err u115)
+    )
+)
+(define-public (cancel-emergency-withdrawal)
+    (match (map-get? emergency-requests tx-sender)
+        request-data (begin
+            (map-delete emergency-requests tx-sender)
+            (ok true)
+        )
+        (err u116)
+    )
+)
+(define-read-only (get-emergency-request (user principal))
+    (map-get? emergency-requests user)
 )
