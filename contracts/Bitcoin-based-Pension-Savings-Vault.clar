@@ -3,12 +3,14 @@
 (define-constant EMERGENCY-COOLDOWN-BLOCKS u1008)
 (define-constant MAX-BPS u10000)
 (define-constant MIN-RETIREMENT-AGE u60)
+(define-constant DEFAULT-INACTIVITY-BLOCKS u262800)
 (define-map users
     principal
     {
         balance: uint,
         start-height: uint,
         retirement-age: uint,
+        last-activity: uint,
     }
 )
 (define-map emergency-requests
@@ -16,6 +18,13 @@
     {
         amount: uint,
         request-height: uint,
+    }
+)
+(define-map beneficiaries
+    principal
+    {
+        beneficiary: principal,
+        inactivity-blocks: uint,
     }
 )
 (define-read-only (get-user (user principal))
@@ -29,6 +38,7 @@
             balance: u0,
             start-height: burn-block-height,
             retirement-age: retirement-age,
+            last-activity: burn-block-height,
         })
         (ok true)
     )
@@ -43,6 +53,7 @@
                     balance: (+ (get balance udata) amount),
                     start-height: (get start-height udata),
                     retirement-age: (get retirement-age udata),
+                    last-activity: burn-block-height,
                 })
                 (ok amount)
             )
@@ -79,6 +90,7 @@
                     balance: u0,
                     start-height: (get start-height user-data),
                     retirement-age: (get retirement-age user-data),
+                    last-activity: burn-block-height,
                 })
                 (stx-transfer? final-amount (as-contract tx-sender) tx-sender)
             )
@@ -100,7 +112,9 @@
         user-data (begin
             (asserts! (> amount u0) (err u108))
             (asserts! (<= amount (get balance user-data)) (err u109))
-            (asserts! (is-none (map-get? emergency-requests tx-sender)) (err u110))
+            (asserts! (is-none (map-get? emergency-requests tx-sender))
+                (err u110)
+            )
             (map-set emergency-requests tx-sender {
                 amount: amount,
                 request-height: burn-block-height,
@@ -120,20 +134,28 @@
                 (final-amount (- requested-amount penalty))
             )
             (begin
-                (asserts! (>= (- current-height request-height) EMERGENCY-COOLDOWN-BLOCKS) (err u112))
+                (asserts!
+                    (>= (- current-height request-height)
+                        EMERGENCY-COOLDOWN-BLOCKS
+                    )
+                    (err u112)
+                )
                 (match (map-get? users tx-sender)
-                    user-data (let (
-                            (current-balance (get balance user-data))
-                        )
+                    user-data (let ((current-balance (get balance user-data)))
                         (begin
-                            (asserts! (>= current-balance requested-amount) (err u113))
+                            (asserts! (>= current-balance requested-amount)
+                                (err u113)
+                            )
                             (map-set users tx-sender {
                                 balance: (- current-balance requested-amount),
                                 start-height: (get start-height user-data),
                                 retirement-age: (get retirement-age user-data),
+                                last-activity: burn-block-height,
                             })
                             (map-delete emergency-requests tx-sender)
-                            (stx-transfer? final-amount (as-contract tx-sender) tx-sender)
+                            (stx-transfer? final-amount (as-contract tx-sender)
+                                tx-sender
+                            )
                         )
                     )
                     (err u114)
@@ -154,4 +176,85 @@
 )
 (define-read-only (get-emergency-request (user principal))
     (map-get? emergency-requests user)
+)
+(define-public (set-beneficiary
+        (beneficiary-address principal)
+        (inactivity-blocks uint)
+    )
+    (match (map-get? users tx-sender)
+        user-data (begin
+            (asserts! (> inactivity-blocks u0) (err u117))
+            (map-set beneficiaries tx-sender {
+                beneficiary: beneficiary-address,
+                inactivity-blocks: inactivity-blocks,
+            })
+            (ok beneficiary-address)
+        )
+        (err u118)
+    )
+)
+(define-read-only (get-beneficiary (vault-owner principal))
+    (map-get? beneficiaries vault-owner)
+)
+(define-read-only (can-beneficiary-claim (vault-owner principal))
+    (match (map-get? users vault-owner)
+        user-data (match (map-get? beneficiaries vault-owner)
+            beneficiary-data (let (
+                    (last-activity (get last-activity user-data))
+                    (inactivity-threshold (get inactivity-blocks beneficiary-data))
+                    (current-height burn-block-height)
+                )
+                (ok (>= (- current-height last-activity) inactivity-threshold))
+            )
+            (err u119)
+        )
+        (err u120)
+    )
+)
+(define-public (beneficiary-claim (vault-owner principal))
+    (let ((claimant tx-sender))
+        (match (map-get? beneficiaries vault-owner)
+            beneficiary-data (begin
+                (asserts! (is-eq claimant (get beneficiary beneficiary-data))
+                    (err u121)
+                )
+                (asserts! (unwrap-panic (can-beneficiary-claim vault-owner))
+                    (err u122)
+                )
+                (match (map-get? users vault-owner)
+                    user-data (let ((vault-balance (get balance user-data)))
+                        (begin
+                            (asserts! (> vault-balance u0) (err u123))
+                            (map-set users vault-owner {
+                                balance: u0,
+                                start-height: (get start-height user-data),
+                                retirement-age: (get retirement-age user-data),
+                                last-activity: (get last-activity user-data),
+                            })
+                            (map-delete beneficiaries vault-owner)
+                            (stx-transfer? vault-balance (as-contract tx-sender)
+                                claimant
+                            )
+                        )
+                    )
+                    (err u124)
+                )
+            )
+            (err u125)
+        )
+    )
+)
+(define-public (reset-activity)
+    (match (map-get? users tx-sender)
+        user-data (begin
+            (map-set users tx-sender {
+                balance: (get balance user-data),
+                start-height: (get start-height user-data),
+                retirement-age: (get retirement-age user-data),
+                last-activity: burn-block-height,
+            })
+            (ok burn-block-height)
+        )
+        (err u126)
+    )
 )
