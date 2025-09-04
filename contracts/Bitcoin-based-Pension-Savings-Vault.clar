@@ -4,6 +4,8 @@
 (define-constant MAX-BPS u10000)
 (define-constant MIN-RETIREMENT-AGE u60)
 (define-constant DEFAULT-INACTIVITY-BLOCKS u262800)
+(define-constant AGE-ADJUSTMENT-COOLDOWN-BLOCKS u52560)
+(define-constant MAX-RETIREMENT-AGE u75)
 (define-map users
     principal
     {
@@ -25,6 +27,13 @@
     {
         beneficiary: principal,
         inactivity-blocks: uint,
+    }
+)
+(define-map age-adjustment-requests
+    principal
+    {
+        new-retirement-age: uint,
+        request-height: uint,
     }
 )
 (define-read-only (get-user (user principal))
@@ -257,4 +266,69 @@
         )
         (err u126)
     )
+)
+(define-public (request-age-adjustment (new-retirement-age uint))
+    (match (map-get? users tx-sender)
+        user-data (begin
+            (asserts! (>= new-retirement-age MIN-RETIREMENT-AGE) (err u127))
+            (asserts! (<= new-retirement-age MAX-RETIREMENT-AGE) (err u128))
+            (asserts!
+                (not (is-eq new-retirement-age (get retirement-age user-data)))
+                (err u129)
+            )
+            (asserts! (is-none (map-get? age-adjustment-requests tx-sender))
+                (err u130)
+            )
+            (map-set age-adjustment-requests tx-sender {
+                new-retirement-age: new-retirement-age,
+                request-height: burn-block-height,
+            })
+            (ok new-retirement-age)
+        )
+        (err u131)
+    )
+)
+(define-public (execute-age-adjustment)
+    (match (map-get? age-adjustment-requests tx-sender)
+        request-data (let (
+                (request-height (get request-height request-data))
+                (new-age (get new-retirement-age request-data))
+                (current-height burn-block-height)
+            )
+            (begin
+                (asserts!
+                    (>= (- current-height request-height)
+                        AGE-ADJUSTMENT-COOLDOWN-BLOCKS
+                    )
+                    (err u132)
+                )
+                (match (map-get? users tx-sender)
+                    user-data (begin
+                        (map-set users tx-sender {
+                            balance: (get balance user-data),
+                            start-height: (get start-height user-data),
+                            retirement-age: new-age,
+                            last-activity: burn-block-height,
+                        })
+                        (map-delete age-adjustment-requests tx-sender)
+                        (ok new-age)
+                    )
+                    (err u133)
+                )
+            )
+        )
+        (err u134)
+    )
+)
+(define-public (cancel-age-adjustment)
+    (match (map-get? age-adjustment-requests tx-sender)
+        request-data (begin
+            (map-delete age-adjustment-requests tx-sender)
+            (ok true)
+        )
+        (err u135)
+    )
+)
+(define-read-only (get-age-adjustment-request (user principal))
+    (map-get? age-adjustment-requests user)
 )
