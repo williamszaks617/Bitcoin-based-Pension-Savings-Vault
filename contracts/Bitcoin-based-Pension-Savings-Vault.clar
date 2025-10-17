@@ -332,3 +332,388 @@
 (define-read-only (get-age-adjustment-request (user principal))
     (map-get? age-adjustment-requests user)
 )
+
+;; ===== PENSION GOAL TRACKER FEATURE =====
+;; Independent goal tracking system with milestones and achievements
+
+;; Goal Tracker Constants
+(define-constant MIN-GOAL-AMOUNT u10000000) ;; 10 STX minimum goal
+(define-constant MAX-GOAL-AMOUNT u1000000000000) ;; 1M STX maximum goal
+(define-constant MIN-MILESTONE-PERCENTAGE u5) ;; 5% minimum milestone
+(define-constant MAX-MILESTONE-PERCENTAGE u100) ;; 100% maximum milestone
+(define-constant GOAL-REWARD-BPS u100) ;; 1% reward for achieving milestones
+(define-constant MAX-MILESTONES-PER-GOAL u10) ;; Maximum 10 milestones per goal
+(define-constant MIN-GOAL-DURATION-BLOCKS u52560) ;; 1 year minimum
+(define-constant MAX-GOAL-DURATION-BLOCKS u525600) ;; 10 years maximum
+
+;; Goal Tracker Error Constants
+(define-constant ERR-GOAL-EXISTS u200)
+(define-constant ERR-GOAL-NOT-FOUND u201)
+(define-constant ERR-INVALID-GOAL-AMOUNT u202)
+(define-constant ERR-INVALID-GOAL-DURATION u203)
+(define-constant ERR-INVALID-MILESTONE-PERCENTAGE u204)
+(define-constant ERR-MILESTONE-NOT-ACHIEVED u205)
+(define-constant ERR-MILESTONE-ALREADY-CLAIMED u206)
+(define-constant ERR-GOAL-NOT-ACTIVE u207)
+(define-constant ERR-GOAL-EXPIRED u208)
+(define-constant ERR-TOO-MANY-MILESTONES u209)
+(define-constant ERR-USER-NOT-ENROLLED u210)
+
+;; Goal Data Maps
+(define-map pension-goals
+    principal
+    {
+        target-amount: uint,
+        current-progress: uint,
+        start-height: uint,
+        target-height: uint,
+        is-active: bool,
+        total-rewards-earned: uint,
+    }
+)
+
+(define-map goal-milestones
+    {user: principal, milestone-id: uint}
+    {
+        percentage: uint,
+        target-amount: uint,
+        is-achieved: bool,
+        is-claimed: bool,
+        achievement-height: (optional uint),
+    }
+)
+
+(define-map user-milestone-count
+    principal
+    uint
+)
+
+(define-map goal-statistics
+    principal
+    {
+        total-goals-created: uint,
+        total-goals-completed: uint,
+        total-milestones-achieved: uint,
+        lifetime-rewards: uint,
+    }
+)
+
+;; Goal Management Functions
+
+(define-public (create-pension-goal (target-amount uint) (duration-blocks uint))
+    (let ((user tx-sender))
+        (begin
+            ;; Validate user is enrolled in pension system
+            (asserts! (is-some (map-get? users user)) (err ERR-USER-NOT-ENROLLED))
+            
+            ;; Validate no existing active goal
+            (asserts! (is-none (map-get? pension-goals user)) (err ERR-GOAL-EXISTS))
+            
+            ;; Validate goal parameters
+            (asserts! (and (>= target-amount MIN-GOAL-AMOUNT)
+                          (<= target-amount MAX-GOAL-AMOUNT)) (err ERR-INVALID-GOAL-AMOUNT))
+            (asserts! (and (>= duration-blocks MIN-GOAL-DURATION-BLOCKS)
+                          (<= duration-blocks MAX-GOAL-DURATION-BLOCKS)) (err ERR-INVALID-GOAL-DURATION))
+            
+            ;; Create goal
+            (map-set pension-goals user {
+                target-amount: target-amount,
+                current-progress: u0,
+                start-height: burn-block-height,
+                target-height: (+ burn-block-height duration-blocks),
+                is-active: true,
+                total-rewards-earned: u0,
+            })
+            
+            ;; Initialize milestone count
+            (map-set user-milestone-count user u0)
+            
+            ;; Update statistics
+            (match (map-get? goal-statistics user)
+                stats (map-set goal-statistics user {
+                    total-goals-created: (+ (get total-goals-created stats) u1),
+                    total-goals-completed: (get total-goals-completed stats),
+                    total-milestones-achieved: (get total-milestones-achieved stats),
+                    lifetime-rewards: (get lifetime-rewards stats),
+                })
+                (map-set goal-statistics user {
+                    total-goals-created: u1,
+                    total-goals-completed: u0,
+                    total-milestones-achieved: u0,
+                    lifetime-rewards: u0,
+                })
+            )
+            
+            (ok target-amount)
+        )
+    )
+)
+
+(define-public (add-goal-milestone (percentage uint))
+    (let ((user tx-sender)
+          (milestone-count (default-to u0 (map-get? user-milestone-count user))))
+        (begin
+            ;; Validate active goal exists
+            (asserts! (is-some (map-get? pension-goals user)) (err ERR-GOAL-NOT-FOUND))
+            
+            ;; Validate milestone parameters
+            (asserts! (and (>= percentage MIN-MILESTONE-PERCENTAGE)
+                          (<= percentage MAX-MILESTONE-PERCENTAGE)) (err ERR-INVALID-MILESTONE-PERCENTAGE))
+            (asserts! (< milestone-count MAX-MILESTONES-PER-GOAL) (err ERR-TOO-MANY-MILESTONES))
+            
+            ;; Get goal data
+            (match (map-get? pension-goals user)
+                goal-data (let ((target-amount (get target-amount goal-data))
+                               (milestone-target (/ (* target-amount percentage) u100)))
+                    (begin
+                        ;; Create milestone
+                        (map-set goal-milestones {user: user, milestone-id: milestone-count} {
+                            percentage: percentage,
+                            target-amount: milestone-target,
+                            is-achieved: false,
+                            is-claimed: false,
+                            achievement-height: none,
+                        })
+                        
+                        ;; Update milestone count
+                        (map-set user-milestone-count user (+ milestone-count u1))
+                        
+                        (ok milestone-count)
+                    )
+                )
+                (err ERR-GOAL-NOT-FOUND)
+            )
+        )
+    )
+)
+
+(define-public (update-goal-progress)
+    (let ((user tx-sender))
+        (match (map-get? pension-goals user)
+            goal-data (match (map-get? users user)
+                user-data (let ((current-balance (get balance user-data))
+                               (target-amount (get target-amount goal-data))
+                               (milestone-count (default-to u0 (map-get? user-milestone-count user))))
+                    (begin
+                        ;; Update goal progress
+                        (map-set pension-goals user {
+                            target-amount: (get target-amount goal-data),
+                            current-progress: current-balance,
+                            start-height: (get start-height goal-data),
+                            target-height: (get target-height goal-data),
+                            is-active: (get is-active goal-data),
+                            total-rewards-earned: (get total-rewards-earned goal-data),
+                        })
+                        
+                        ;; Check and update milestone achievements
+                        (fold check-milestone-achievement (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9) current-balance)
+                        
+                        ;; Check if goal is completed
+                        (if (>= current-balance target-amount)
+                            (begin
+                                (map-set pension-goals user {
+                                    target-amount: target-amount,
+                                    current-progress: current-balance,
+                                    start-height: (get start-height goal-data),
+                                    target-height: (get target-height goal-data),
+                                    is-active: false,
+                                    total-rewards-earned: (get total-rewards-earned goal-data),
+                                })
+                                
+                                ;; Update completion statistics
+                                (match (map-get? goal-statistics user)
+                                    stats (map-set goal-statistics user {
+                                        total-goals-created: (get total-goals-created stats),
+                                        total-goals-completed: (+ (get total-goals-completed stats) u1),
+                                        total-milestones-achieved: (get total-milestones-achieved stats),
+                                        lifetime-rewards: (get lifetime-rewards stats),
+                                    })
+                                    true
+                                )
+                                (ok "goal-completed")
+                            )
+                            (ok "progress-updated")
+                        )
+                    )
+                )
+                (err ERR-USER-NOT-ENROLLED)
+            )
+            (err ERR-GOAL-NOT-FOUND)
+        )
+    )
+)
+
+(define-private (check-milestone-achievement (milestone-id uint) (current-balance uint))
+    (let ((user tx-sender))
+        (match (map-get? goal-milestones {user: user, milestone-id: milestone-id})
+            milestone-data (let ((target-amount (get target-amount milestone-data))
+                                (is-achieved (get is-achieved milestone-data)))
+                (begin
+                    (if (and (>= current-balance target-amount) (not is-achieved))
+                        (begin
+                            (map-set goal-milestones {user: user, milestone-id: milestone-id} {
+                                percentage: (get percentage milestone-data),
+                                target-amount: target-amount,
+                                is-achieved: true,
+                                is-claimed: (get is-claimed milestone-data),
+                                achievement-height: (some burn-block-height),
+                            })
+                            
+                            ;; Update statistics
+                            (match (map-get? goal-statistics user)
+                                stats (map-set goal-statistics user {
+                                    total-goals-created: (get total-goals-created stats),
+                                    total-goals-completed: (get total-goals-completed stats),
+                                    total-milestones-achieved: (+ (get total-milestones-achieved stats) u1),
+                                    lifetime-rewards: (get lifetime-rewards stats),
+                                })
+                                true
+                            )
+                            current-balance
+                        )
+                        current-balance
+                    )
+                )
+            )
+            current-balance
+        )
+    )
+)
+
+(define-public (claim-milestone-reward (milestone-id uint))
+    (let ((user tx-sender))
+        (match (map-get? goal-milestones {user: user, milestone-id: milestone-id})
+            milestone-data (let ((is-achieved (get is-achieved milestone-data))
+                                (is-claimed (get is-claimed milestone-data))
+                                (target-amount (get target-amount milestone-data))
+                                (reward-amount (/ (* target-amount GOAL-REWARD-BPS) MAX-BPS)))
+                (begin
+                    ;; Validate milestone is achieved and not claimed
+                    (asserts! is-achieved (err ERR-MILESTONE-NOT-ACHIEVED))
+                    (asserts! (not is-claimed) (err ERR-MILESTONE-ALREADY-CLAIMED))
+                    
+                    ;; Mark as claimed
+                    (map-set goal-milestones {user: user, milestone-id: milestone-id} {
+                        percentage: (get percentage milestone-data),
+                        target-amount: target-amount,
+                        is-achieved: true,
+                        is-claimed: true,
+                        achievement-height: (get achievement-height milestone-data),
+                    })
+                    
+                    ;; Update goal rewards
+                    (match (map-get? pension-goals user)
+                        goal-data (map-set pension-goals user {
+                            target-amount: (get target-amount goal-data),
+                            current-progress: (get current-progress goal-data),
+                            start-height: (get start-height goal-data),
+                            target-height: (get target-height goal-data),
+                            is-active: (get is-active goal-data),
+                            total-rewards-earned: (+ (get total-rewards-earned goal-data) reward-amount),
+                        })
+                        true
+                    )
+                    
+                    ;; Update lifetime rewards
+                    (match (map-get? goal-statistics user)
+                        stats (map-set goal-statistics user {
+                            total-goals-created: (get total-goals-created stats),
+                            total-goals-completed: (get total-goals-completed stats),
+                            total-milestones-achieved: (get total-milestones-achieved stats),
+                            lifetime-rewards: (+ (get lifetime-rewards stats) reward-amount),
+                        })
+                        true
+                    )
+                    
+                    (ok reward-amount)
+                )
+            )
+            (err ERR-GOAL-NOT-FOUND)
+        )
+    )
+)
+
+(define-public (deactivate-goal)
+    (let ((user tx-sender))
+        (match (map-get? pension-goals user)
+            goal-data (begin
+                (map-set pension-goals user {
+                    target-amount: (get target-amount goal-data),
+                    current-progress: (get current-progress goal-data),
+                    start-height: (get start-height goal-data),
+                    target-height: (get target-height goal-data),
+                    is-active: false,
+                    total-rewards-earned: (get total-rewards-earned goal-data),
+                })
+                (ok true)
+            )
+            (err ERR-GOAL-NOT-FOUND)
+        )
+    )
+)
+
+;; Goal Tracker Read-Only Functions
+
+(define-read-only (get-pension-goal (user principal))
+    (map-get? pension-goals user)
+)
+
+(define-read-only (get-goal-milestone (user principal) (milestone-id uint))
+    (map-get? goal-milestones {user: user, milestone-id: milestone-id})
+)
+
+(define-read-only (get-goal-statistics (user principal))
+    (map-get? goal-statistics user)
+)
+
+(define-read-only (get-goal-progress-percentage (user principal))
+    (match (map-get? pension-goals user)
+        goal-data (let ((current (get current-progress goal-data))
+                       (target (get target-amount goal-data)))
+            (if (> target u0)
+                (ok (/ (* current u100) target))
+                (ok u0)
+            )
+        )
+        (err ERR-GOAL-NOT-FOUND)
+    )
+)
+
+(define-read-only (is-goal-expired (user principal))
+    (match (map-get? pension-goals user)
+        goal-data (ok (> burn-block-height (get target-height goal-data)))
+        (err ERR-GOAL-NOT-FOUND)
+    )
+)
+
+(define-read-only (get-milestone-count (user principal))
+    (ok (default-to u0 (map-get? user-milestone-count user)))
+)
+
+(define-read-only (get-achievable-milestones (user principal))
+    (match (map-get? pension-goals user)
+        goal-data (let ((current-progress (get current-progress goal-data))
+                       (milestone-count (default-to u0 (map-get? user-milestone-count user))))
+            (ok (fold count-achievable-milestones (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9) 
+                     {user: user, progress: current-progress, count: u0}))
+        )
+        (err ERR-GOAL-NOT-FOUND)
+    )
+)
+
+(define-private (count-achievable-milestones (milestone-id uint) (data {user: principal, progress: uint, count: uint}))
+    (let ((user (get user data))
+          (progress (get progress data))
+          (current-count (get count data)))
+        (match (map-get? goal-milestones {user: user, milestone-id: milestone-id})
+            milestone-data (let ((target (get target-amount milestone-data))
+                                (is-achieved (get is-achieved milestone-data)))
+                (if (and (>= progress target) (not is-achieved))
+                    {user: user, progress: progress, count: (+ current-count u1)}
+                    {user: user, progress: progress, count: current-count}
+                )
+            )
+            {user: user, progress: progress, count: current-count}
+        )
+    )
+)
