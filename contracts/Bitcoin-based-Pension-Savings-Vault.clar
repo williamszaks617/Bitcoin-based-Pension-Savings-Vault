@@ -373,7 +373,10 @@
 )
 
 (define-map goal-milestones
-    {user: principal, milestone-id: uint}
+    {
+        user: principal,
+        milestone-id: uint,
+    }
     {
         percentage: uint,
         target-amount: uint,
@@ -400,21 +403,36 @@
 
 ;; Goal Management Functions
 
-(define-public (create-pension-goal (target-amount uint) (duration-blocks uint))
+(define-public (create-pension-goal
+        (target-amount uint)
+        (duration-blocks uint)
+    )
     (let ((user tx-sender))
         (begin
             ;; Validate user is enrolled in pension system
             (asserts! (is-some (map-get? users user)) (err ERR-USER-NOT-ENROLLED))
-            
+
             ;; Validate no existing active goal
-            (asserts! (is-none (map-get? pension-goals user)) (err ERR-GOAL-EXISTS))
-            
+            (asserts! (is-none (map-get? pension-goals user))
+                (err ERR-GOAL-EXISTS)
+            )
+
             ;; Validate goal parameters
-            (asserts! (and (>= target-amount MIN-GOAL-AMOUNT)
-                          (<= target-amount MAX-GOAL-AMOUNT)) (err ERR-INVALID-GOAL-AMOUNT))
-            (asserts! (and (>= duration-blocks MIN-GOAL-DURATION-BLOCKS)
-                          (<= duration-blocks MAX-GOAL-DURATION-BLOCKS)) (err ERR-INVALID-GOAL-DURATION))
-            
+            (asserts!
+                (and
+                    (>= target-amount MIN-GOAL-AMOUNT)
+                    (<= target-amount MAX-GOAL-AMOUNT)
+                )
+                (err ERR-INVALID-GOAL-AMOUNT)
+            )
+            (asserts!
+                (and
+                    (>= duration-blocks MIN-GOAL-DURATION-BLOCKS)
+                    (<= duration-blocks MAX-GOAL-DURATION-BLOCKS)
+                )
+                (err ERR-INVALID-GOAL-DURATION)
+            )
+
             ;; Create goal
             (map-set pension-goals user {
                 target-amount: target-amount,
@@ -424,10 +442,10 @@
                 is-active: true,
                 total-rewards-earned: u0,
             })
-            
+
             ;; Initialize milestone count
             (map-set user-milestone-count user u0)
-            
+
             ;; Update statistics
             (match (map-get? goal-statistics user)
                 stats (map-set goal-statistics user {
@@ -443,41 +461,57 @@
                     lifetime-rewards: u0,
                 })
             )
-            
+
             (ok target-amount)
         )
     )
 )
 
 (define-public (add-goal-milestone (percentage uint))
-    (let ((user tx-sender)
-          (milestone-count (default-to u0 (map-get? user-milestone-count user))))
+    (let (
+            (user tx-sender)
+            (milestone-count (default-to u0 (map-get? user-milestone-count user)))
+        )
         (begin
             ;; Validate active goal exists
-            (asserts! (is-some (map-get? pension-goals user)) (err ERR-GOAL-NOT-FOUND))
-            
+            (asserts! (is-some (map-get? pension-goals user))
+                (err ERR-GOAL-NOT-FOUND)
+            )
+
             ;; Validate milestone parameters
-            (asserts! (and (>= percentage MIN-MILESTONE-PERCENTAGE)
-                          (<= percentage MAX-MILESTONE-PERCENTAGE)) (err ERR-INVALID-MILESTONE-PERCENTAGE))
-            (asserts! (< milestone-count MAX-MILESTONES-PER-GOAL) (err ERR-TOO-MANY-MILESTONES))
-            
+            (asserts!
+                (and
+                    (>= percentage MIN-MILESTONE-PERCENTAGE)
+                    (<= percentage MAX-MILESTONE-PERCENTAGE)
+                )
+                (err ERR-INVALID-MILESTONE-PERCENTAGE)
+            )
+            (asserts! (< milestone-count MAX-MILESTONES-PER-GOAL)
+                (err ERR-TOO-MANY-MILESTONES)
+            )
+
             ;; Get goal data
             (match (map-get? pension-goals user)
-                goal-data (let ((target-amount (get target-amount goal-data))
-                               (milestone-target (/ (* target-amount percentage) u100)))
+                goal-data (let (
+                        (target-amount (get target-amount goal-data))
+                        (milestone-target (/ (* target-amount percentage) u100))
+                    )
                     (begin
                         ;; Create milestone
-                        (map-set goal-milestones {user: user, milestone-id: milestone-count} {
+                        (map-set goal-milestones {
+                            user: user,
+                            milestone-id: milestone-count,
+                        } {
                             percentage: percentage,
                             target-amount: milestone-target,
                             is-achieved: false,
                             is-claimed: false,
                             achievement-height: none,
                         })
-                        
+
                         ;; Update milestone count
                         (map-set user-milestone-count user (+ milestone-count u1))
-                        
+
                         (ok milestone-count)
                     )
                 )
@@ -491,9 +525,11 @@
     (let ((user tx-sender))
         (match (map-get? pension-goals user)
             goal-data (match (map-get? users user)
-                user-data (let ((current-balance (get balance user-data))
-                               (target-amount (get target-amount goal-data))
-                               (milestone-count (default-to u0 (map-get? user-milestone-count user))))
+                user-data (let (
+                        (current-balance (get balance user-data))
+                        (target-amount (get target-amount goal-data))
+                        (milestone-count (default-to u0 (map-get? user-milestone-count user)))
+                    )
                     (begin
                         ;; Update goal progress
                         (map-set pension-goals user {
@@ -504,10 +540,13 @@
                             is-active: (get is-active goal-data),
                             total-rewards-earned: (get total-rewards-earned goal-data),
                         })
-                        
+
                         ;; Check and update milestone achievements
-                        (fold check-milestone-achievement (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9) current-balance)
-                        
+                        (fold check-milestone-achievement
+                            (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9)
+                            current-balance
+                        )
+
                         ;; Check if goal is completed
                         (if (>= current-balance target-amount)
                             (begin
@@ -519,7 +558,7 @@
                                     is-active: false,
                                     total-rewards-earned: (get total-rewards-earned goal-data),
                                 })
-                                
+
                                 ;; Update completion statistics
                                 (match (map-get? goal-statistics user)
                                     stats (map-set goal-statistics user {
@@ -543,22 +582,33 @@
     )
 )
 
-(define-private (check-milestone-achievement (milestone-id uint) (current-balance uint))
+(define-private (check-milestone-achievement
+        (milestone-id uint)
+        (current-balance uint)
+    )
     (let ((user tx-sender))
-        (match (map-get? goal-milestones {user: user, milestone-id: milestone-id})
-            milestone-data (let ((target-amount (get target-amount milestone-data))
-                                (is-achieved (get is-achieved milestone-data)))
+        (match (map-get? goal-milestones {
+            user: user,
+            milestone-id: milestone-id,
+        })
+            milestone-data (let (
+                    (target-amount (get target-amount milestone-data))
+                    (is-achieved (get is-achieved milestone-data))
+                )
                 (begin
                     (if (and (>= current-balance target-amount) (not is-achieved))
                         (begin
-                            (map-set goal-milestones {user: user, milestone-id: milestone-id} {
+                            (map-set goal-milestones {
+                                user: user,
+                                milestone-id: milestone-id,
+                            } {
                                 percentage: (get percentage milestone-data),
                                 target-amount: target-amount,
                                 is-achieved: true,
                                 is-claimed: (get is-claimed milestone-data),
                                 achievement-height: (some burn-block-height),
                             })
-                            
+
                             ;; Update statistics
                             (match (map-get? goal-statistics user)
                                 stats (map-set goal-statistics user {
@@ -582,25 +632,35 @@
 
 (define-public (claim-milestone-reward (milestone-id uint))
     (let ((user tx-sender))
-        (match (map-get? goal-milestones {user: user, milestone-id: milestone-id})
-            milestone-data (let ((is-achieved (get is-achieved milestone-data))
-                                (is-claimed (get is-claimed milestone-data))
-                                (target-amount (get target-amount milestone-data))
-                                (reward-amount (/ (* target-amount GOAL-REWARD-BPS) MAX-BPS)))
+        (match (map-get? goal-milestones {
+            user: user,
+            milestone-id: milestone-id,
+        })
+            milestone-data (let (
+                    (is-achieved (get is-achieved milestone-data))
+                    (is-claimed (get is-claimed milestone-data))
+                    (target-amount (get target-amount milestone-data))
+                    (reward-amount (/ (* target-amount GOAL-REWARD-BPS) MAX-BPS))
+                )
                 (begin
                     ;; Validate milestone is achieved and not claimed
                     (asserts! is-achieved (err ERR-MILESTONE-NOT-ACHIEVED))
-                    (asserts! (not is-claimed) (err ERR-MILESTONE-ALREADY-CLAIMED))
-                    
+                    (asserts! (not is-claimed)
+                        (err ERR-MILESTONE-ALREADY-CLAIMED)
+                    )
+
                     ;; Mark as claimed
-                    (map-set goal-milestones {user: user, milestone-id: milestone-id} {
+                    (map-set goal-milestones {
+                        user: user,
+                        milestone-id: milestone-id,
+                    } {
                         percentage: (get percentage milestone-data),
                         target-amount: target-amount,
                         is-achieved: true,
                         is-claimed: true,
                         achievement-height: (get achievement-height milestone-data),
                     })
-                    
+
                     ;; Update goal rewards
                     (match (map-get? pension-goals user)
                         goal-data (map-set pension-goals user {
@@ -613,7 +673,7 @@
                         })
                         true
                     )
-                    
+
                     ;; Update lifetime rewards
                     (match (map-get? goal-statistics user)
                         stats (map-set goal-statistics user {
@@ -624,7 +684,7 @@
                         })
                         true
                     )
-                    
+
                     (ok reward-amount)
                 )
             )
@@ -658,8 +718,14 @@
     (map-get? pension-goals user)
 )
 
-(define-read-only (get-goal-milestone (user principal) (milestone-id uint))
-    (map-get? goal-milestones {user: user, milestone-id: milestone-id})
+(define-read-only (get-goal-milestone
+        (user principal)
+        (milestone-id uint)
+    )
+    (map-get? goal-milestones {
+        user: user,
+        milestone-id: milestone-id,
+    })
 )
 
 (define-read-only (get-goal-statistics (user principal))
@@ -668,8 +734,10 @@
 
 (define-read-only (get-goal-progress-percentage (user principal))
     (match (map-get? pension-goals user)
-        goal-data (let ((current (get current-progress goal-data))
-                       (target (get target-amount goal-data)))
+        goal-data (let (
+                (current (get current-progress goal-data))
+                (target (get target-amount goal-data))
+            )
             (if (> target u0)
                 (ok (/ (* current u100) target))
                 (ok u0)
@@ -692,28 +760,138 @@
 
 (define-read-only (get-achievable-milestones (user principal))
     (match (map-get? pension-goals user)
-        goal-data (let ((current-progress (get current-progress goal-data))
-                       (milestone-count (default-to u0 (map-get? user-milestone-count user))))
-            (ok (fold count-achievable-milestones (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9) 
-                     {user: user, progress: current-progress, count: u0}))
+        goal-data (let (
+                (current-progress (get current-progress goal-data))
+                (milestone-count (default-to u0 (map-get? user-milestone-count user)))
+            )
+            (ok (fold count-achievable-milestones
+                (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9) {
+                user: user,
+                progress: current-progress,
+                count: u0,
+            }))
         )
         (err ERR-GOAL-NOT-FOUND)
     )
 )
 
-(define-private (count-achievable-milestones (milestone-id uint) (data {user: principal, progress: uint, count: uint}))
-    (let ((user (get user data))
-          (progress (get progress data))
-          (current-count (get count data)))
-        (match (map-get? goal-milestones {user: user, milestone-id: milestone-id})
-            milestone-data (let ((target (get target-amount milestone-data))
-                                (is-achieved (get is-achieved milestone-data)))
+(define-private (count-achievable-milestones
+        (milestone-id uint)
+        (data {
+            user: principal,
+            progress: uint,
+            count: uint,
+        })
+    )
+    (let (
+            (user (get user data))
+            (progress (get progress data))
+            (current-count (get count data))
+        )
+        (match (map-get? goal-milestones {
+            user: user,
+            milestone-id: milestone-id,
+        })
+            milestone-data (let (
+                    (target (get target-amount milestone-data))
+                    (is-achieved (get is-achieved milestone-data))
+                )
                 (if (and (>= progress target) (not is-achieved))
-                    {user: user, progress: progress, count: (+ current-count u1)}
-                    {user: user, progress: progress, count: current-count}
+                    {
+                        user: user,
+                        progress: progress,
+                        count: (+ current-count u1),
+                    }
+                    {
+                        user: user,
+                        progress: progress,
+                        count: current-count,
+                    }
                 )
             )
-            {user: user, progress: progress, count: current-count}
+            {
+                user: user,
+                progress: progress,
+                count: current-count,
+            }
         )
+    )
+)
+
+(define-constant MAX-KEEPER-REWARD-BPS u200)
+(define-constant ERR-KEEPER-NOT-ENROLLED u300)
+(define-constant ERR-INVALID-KEEPER-REWARD u301)
+(define-constant ERR-KEEPER-UNAUTHORIZED u302)
+(define-constant ERR-NO-KEEPER u303)
+(define-map keepers
+    principal
+    {
+        keeper: principal,
+        reward-bps: uint,
+    }
+)
+(define-read-only (get-keeper (owner principal))
+    (map-get? keepers owner)
+)
+(define-public (set-keeper
+        (keeper principal)
+        (reward-bps uint)
+    )
+    (match (map-get? users tx-sender)
+        user-data (begin
+            (asserts! (<= reward-bps MAX-KEEPER-REWARD-BPS)
+                (err ERR-INVALID-KEEPER-REWARD)
+            )
+            (map-set keepers tx-sender {
+                keeper: keeper,
+                reward-bps: reward-bps,
+            })
+            (ok keeper)
+        )
+        (err ERR-KEEPER-NOT-ENROLLED)
+    )
+)
+(define-public (revoke-keeper)
+    (if (is-some (map-get? keepers tx-sender))
+        (begin
+            (map-delete keepers tx-sender)
+            (ok true)
+        )
+        (err ERR-NO-KEEPER)
+    )
+)
+(define-public (keeper-ping (owner principal))
+    (match (map-get? keepers owner)
+        kdata (match (map-get? users owner)
+            user-data (let (
+                    (balance (get balance user-data))
+                    (bps (get reward-bps kdata))
+                    (reward (/ (* balance bps) MAX-BPS))
+                    (new-balance (- balance reward))
+                )
+                (begin
+                    (asserts! (is-eq tx-sender (get keeper kdata))
+                        (err ERR-KEEPER-UNAUTHORIZED)
+                    )
+                    (map-set users owner {
+                        balance: new-balance,
+                        start-height: (get start-height user-data),
+                        retirement-age: (get retirement-age user-data),
+                        last-activity: burn-block-height,
+                    })
+                    (if (> reward u0)
+                        (begin
+                            (try! (stx-transfer? reward (as-contract tx-sender)
+                                tx-sender
+                            ))
+                            (ok reward)
+                        )
+                        (ok u0)
+                    )
+                )
+            )
+            (err ERR-KEEPER-NOT-ENROLLED)
+        )
+        (err ERR-NO-KEEPER)
     )
 )
